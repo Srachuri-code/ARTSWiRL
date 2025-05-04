@@ -20,7 +20,7 @@ load_dotenv()
 agent_002 = art.TrainableModel(
     name="email-agent-002",
     project="email_agent",
-    base_model="Qwen/Qwen2.5-14B-Instruct",
+    base_model="meta-llama/Llama-3.2-3B-Instruct",
     config=ProjectPolicyConfig(
         max_turns=10,
         log_to_openpipe=True,

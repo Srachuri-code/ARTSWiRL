@@ -175,7 +175,7 @@ async def determine_if_answer_is_correct(answer: str, query: SyntheticQuery) -> 
     ]
 
     response = await acompletion(
-        model="gemini/gemini-2.0-flash",
+        model="openai/gpt-4.1",
         messages=messages,
         temperature=0,
         caching=True,
@@ -284,98 +284,38 @@ async def rollout(
                 break
             tool_name = tool_call["name"]
             try:
+                # Accept alternate spellings ('args', 'arguments') for robustness
+                if "tool_args" not in tool_call:
+                    if "args" in tool_call:
+                        tool_call["tool_args"] = tool_call.pop("args")
+                    elif "arguments" in tool_call:
+                        tool_call["tool_args"] = tool_call.pop("arguments")
+
+                if "tool_args" not in tool_call:
+                    rubric.bad_tool_call_args = True
+                    traj.logs.append(f"Tool call missing tool_args: {tool_call}")
+                    break
                 tool_args = json.loads(tool_call["arguments"])
                 assert isinstance(tool_args, dict)
             except Exception as e:
                 rubric.bad_tool_call_args = True
                 break
         else:
-            raw_content = choice.message.content
-            if raw_content is None:
-                rubric.cant_parse_tool_call = True
-                break
-            start_index = raw_content.find("{")
-            end_index = raw_content.rfind("}")
-            if not (start_index != -1 and end_index != -1 and start_index < end_index):
-                rubric.cant_parse_tool_call = True
-                break
-            json_str = raw_content[start_index : end_index + 1]
+            # In no-tool mode we interpret whatever the assistant returns as
+            # the **final answer**, no parsing required.  This avoids the
+            # bad_tool_call_args penalty and gives a usable reward signal for
+            # SWiRL.
 
-            try:
-                tool_call = json.loads(json_str)
-            except Exception as e:
-                traj.logs.append(f"Error parsing tool call: {e}")
-                rubric.cant_parse_tool_call = True
-                break
+            final_answer = choice.message.content.strip() if choice.message.content else ""
 
-            if "tool_args" not in tool_call:
-                rubric.bad_tool_call_args = True
-                traj.logs.append(f"Tool call missing tool_args: {tool_call}")
-                break
-            tool_name = tool_call.get("tool_name")
-            tool_args = tool_call.get("tool_args")
-
-        match tool_name:
-            case "search_emails":
-                try:
-                    search_results = search_emails(
-                        **tool_args,
-                        inbox=scenario.inbox_address,
-                    )
-                    traj.messages_and_choices.append(
-                        tool_response(
-                            [asdict(r) for r in search_results],
-                            choice.message,
-                        )
-                    )
-                    for r in search_results:
-                        if r.message_id == scenario.message_ids[0]:
-                            rubric.ever_found_right_email = True
-                except Exception as e:
-                    rubric.bad_tool_call_args = True
-                    traj.logs.append(f"Error searching emails: {e}")
-                    break
-            case "read_email":
-                message_id_to_read = tool_args.get("message_id")
-                if not isinstance(message_id_to_read, str):
-                    rubric.bad_tool_call_args = True
-                    break
-                if message_id_to_read == scenario.message_ids[0]:
-                    rubric.ever_read_right_email = True
-                email_content = read_email(message_id_to_read)
-                if email_content is None:
-                    traj.messages_and_choices.append(
-                        tool_response({"error": "Email not found"}, choice.message)
-                    )
-                    rubric.ever_tried_to_read_invalid_email = True
-                else:
-                    traj.messages_and_choices.append(
-                        tool_response(email_content.model_dump(), choice.message)
-                    )
-            case "return_final_answer":
-                final_answer = tool_args.get("answer")
-                final_sources = tool_args.get("sources")
-
-                if (
-                    final_answer is None
-                    or final_sources is None
-                    or not isinstance(final_sources, list)
-                ):
-                    rubric.bad_tool_call_args = True
-                    break
-
-                if final_answer == "I don't know":
-                    rubric.returned_i_dont_know = True
-                else:
-                    rubric.attempted_answer = True
-                    rubric.answer_correct = await determine_if_answer_is_correct(
-                        final_answer, scenario
-                    )
-                    rubric.sources_correct = scenario.message_ids[0] in final_sources
-                break
-            case _:
-                rubric.bad_tool_call_name = True
-                break
+            if final_answer == "":
+                rubric.returned_i_dont_know = True
+            else:
+                rubric.attempted_answer = True
+                rubric.answer_correct = await determine_if_answer_is_correct(
+                    final_answer, scenario
+                )
+            break
 
     reward = calculate_reward(model.config, rubric, traj)
     traj.reward = reward
